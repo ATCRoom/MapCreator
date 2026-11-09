@@ -1,0 +1,60 @@
+# Builds ATCRoom Map Creator on GitHub's Windows machines at every push: the checks of the map format and the importers,
+# then the program (one exe, .NET not needed), attached to the run as an artifact (a GitHub account is needed to
+# download it). A push to main also publishes the release of its version (Releases page, no account needed): tag
+# v<Version of MapCreator/App/ATCRoomMapCreator.csproj>, replaced at each push of the same version.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+
+      # Checks the map format and the importers: the build fails if a check fails.
+      - name: Self-test of the map format and importers
+        run: dotnet run --project MapCreator/SelfTest/ATCRoom.Maps.SelfTest.csproj -c Release
+
+      - name: Build ATCRoom Map Creator
+        run: >
+          dotnet publish MapCreator/App/ATCRoomMapCreator.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish-mapcreator
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ATCRoomMapCreator-win-x64
+          path: |
+            publish-mapcreator/ATCRoomMapCreator.exe
+            README.md
+            LICENSE
+            docs/MAP-FORMAT.md
+
+      - name: Publish the release (Releases)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Copy-Item README.md, LICENSE, docs/MAP-FORMAT.md publish-mapcreator/
+          Compress-Archive -Path publish-mapcreator/ATCRoomMapCreator.exe, publish-mapcreator/README.md, publish-mapcreator/LICENSE, publish-mapcreator/MAP-FORMAT.md -DestinationPath ATCRoomMapCreator-win-x64.zip
+          '{0}  {1}' -f (Get-FileHash ATCRoomMapCreator-win-x64.zip -Algorithm SHA256).Hash.ToLower(), 'ATCRoomMapCreator-win-x64.zip' | Set-Content SHA256SUMS.txt
+          $date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')
+          $short = '${{ github.sha }}'.Substring(0, 7)
+          $version = (Select-Xml -Path MapCreator/App/ATCRoomMapCreator.csproj -XPath '//Version').Node.InnerText
+          $tag = "v$version"
+          $pre = if ($version.Contains('-')) { '--prerelease' } else { '--latest' }
+          $notes = "ATCRoom Map Creator $version, build of $date UTC (commit $short), for Windows 64-bit (.NET not needed). Makes the maps of AuroraPAR v2 Trainer and TWR Trainer from your own files (IVAO, EuroScope, KML, AIP). The maps you make are for your own use only (do not distribute them), for simulation only, never for real navigation or air traffic control. Unzip and run; Windows may show a SmartScreen warning (More info -> Run anyway)."
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create $tag ATCRoomMapCreator-win-x64.zip SHA256SUMS.txt $pre --target '${{ github.sha }}' --title "ATCRoom Map Creator $version (build $date UTC)" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release not created' }
